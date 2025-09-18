@@ -1,7 +1,7 @@
 streamlit==1.38.0
 pandas==2.2.2
 numpy==1.26.4
-requests==2.32.4
-tqdm==4.67.1
 scikit-learn==1.5.2
 xgboost==2.1.1
+tqdm==4.66.5
+requests==2.32.3
