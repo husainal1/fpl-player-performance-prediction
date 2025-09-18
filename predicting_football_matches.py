@@ -7,9 +7,6 @@ Original file is located at
     https://colab.research.google.com/drive/1kr0yQPJYDb-rBHKq6XedQceqKWEcRM05
 """
 
-# basic setup - install libraries
-!pip install pandas==2.2.2 numpy==1.26.4 requests==2.32.3 tqdm==4.66.5 scikit-learn==1.5.2 xgboost==2.1.1
-
 #imports - pandas/numpy for data, requests for api, xgboost + sklearn for model
 import pandas as pd, numpy as np, requests, time, json, math, datetime as dt
 from tqdm import tqdm
