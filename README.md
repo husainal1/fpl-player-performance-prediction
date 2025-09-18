@@ -3,7 +3,7 @@
 This project uses machine learning (XGBoost regression) to predict upcoming Fantasy Premier League (FPL) player performance. 
 The model is trained on official FPL match-by-match data (via the public FPL API) with feature engineering such as:
 - Player form (lagged states, rolling averages for goals, assists, and points)
-- Team strength metrics (attack vs defens, home vs away)
+- Team strength metrics (attack vs defense, home vs away)
 - Availability indicators (minutes playes, recent match participation)
 - Match context (opponent strength, fixture difficulty, gameweek timing)
 
