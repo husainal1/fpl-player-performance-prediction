@@ -10,6 +10,64 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from xgboost import XGBRegressor
 import streamlit as st
 
+#Caching helpers
+@st.cache_data(show_spinner=True)
+def fetch_bootstrap_and_fixtures():
+    boot = get_json(f"{BASE}/bootstrap-static/")
+    players_meta = pd.DataFrame(boot["elements"])
+    teams_meta   = pd.DataFrame(boot["teams"])
+    fixtures     = pd.DataFrame(get_json(f"{BASE}/fixtures/"))
+    return players_meta, teams_meta, fixtures
+
+@st.cache_data(show_spinner=True)
+def tidy_meta_cached(players_meta, teams_meta):
+    teams = teams_meta.rename(columns={"id":"team_id"})[
+        ["team_id","name","short_name","strength",
+         "strength_attack_home","strength_attack_away",
+         "strength_defence_home","strength_defence_away"]
+    ]
+    players = players_meta.rename(columns={"id":"player_id","team":"team_id"})[
+        ["player_id","first_name","second_name","web_name","team_id","element_type"]
+    ].merge(teams, on="team_id", how="left")
+    return players, teams
+
+@st.cache_data(show_spinner=True)
+def fetch_all_histories_limited(player_ids, limit=None):
+    ids = player_ids if limit is None else player_ids[:limit]
+    out = []
+    for pid in ids:
+        try:
+            j = get_json(f"{BASE}/element-summary/{pid}/")
+            df = pd.DataFrame(j.get("history", []))
+            if df.empty: 
+                continue
+            needed = ['element','opponent_team','round','minutes','total_points','goals_scored','assists',
+                      'ict_index','creativity','influence','threat',
+                      'expected_goals','expected_assists','expected_goal_involvements',
+                      'expected_goals_conceded','was_home','kickoff_time']
+            for c in needed:
+                if c not in df.columns: df[c] = np.nan
+            df["player_id"] = pid
+            out.append(df)
+        except:
+            pass
+    hist = pd.concat(out, ignore_index=True)
+    hist["kickoff_time"] = pd.to_datetime(hist["kickoff_time"], errors="coerce")
+    hist["round"] = pd.to_numeric(hist["round"], errors="coerce")
+    hist["was_home"] = hist["was_home"].astype("Int64")
+    hist = hist[hist["kickoff_time"].notna()].sort_values(["player_id","kickoff_time"]).reset_index(drop=True)
+    return hist
+
+@st.cache_resource(show_spinner=True)
+def train_model_cached(X, y):
+    model = XGBRegressor(
+        n_estimators=600, learning_rate=0.05, max_depth=6,
+        subsample=0.8, colsample_bytree=0.8,
+        random_state=42, n_jobs=-1, tree_method="hist"
+    )
+    model.fit(X, y)
+    return model
+
 # Streamlit setup
 st.set_page_config(page_title="EPL Player Predictor", page_icon="⚽", layout="wide")
 st.title("⚽ EPL Player Predictor")
@@ -27,6 +85,7 @@ def get_json(url, retries=5, sleep=0.5):
         time.sleep(sleep*(i+1))
     r.raise_for_status()
 
+if build:
 # grab static data: players, teams, fixtures
 bootstrap = get_json(f"{BASE}/bootstrap-static/")
 players_meta = pd.DataFrame(bootstrap['elements'])
@@ -44,6 +103,13 @@ players = players_meta[['id','first_name','second_name','web_name','team','eleme
             .merge(teams, on='team_id', how='left')
 
 players.head()
+
+# --- controls to avoid heavy work at import ---
+st.sidebar.header("Run options")
+limit_partial = st.sidebar.checkbox("Use partial dataset (faster first run)", value=True)
+max_players   = st.sidebar.slider("Max players when partial", 50, 600, 200, 50)
+
+build = st.button("Build / Refresh predictions")
 
 # function to get match-by-match history for a player
 def fetch_player_history(pid):
