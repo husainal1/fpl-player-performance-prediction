@@ -85,285 +85,209 @@ def get_json(url, retries=5, sleep=0.5):
         time.sleep(sleep*(i+1))
     r.raise_for_status()
 
-if build:
-# grab static data: players, teams, fixtures
-bootstrap = get_json(f"{BASE}/bootstrap-static/")
-players_meta = pd.DataFrame(bootstrap['elements'])
-teams_meta   = pd.DataFrame(bootstrap['teams'])
-fixtures     = pd.DataFrame(get_json(f"{BASE}/fixtures/"))
-
-# keep only useful team cols
-teams = teams_meta[['id','name','short_name','strength',
-                    'strength_attack_home','strength_attack_away',
-                    'strength_defence_home','strength_defence_away']].rename(columns={'id':'team_id'})
-
-# minimal player info
-players = players_meta[['id','first_name','second_name','web_name','team','element_type']] \
-            .rename(columns={'id':'player_id','team':'team_id'}) \
-            .merge(teams, on='team_id', how='left')
-
-players.head()
-
-# --- controls to avoid heavy work at import ---
+# controls to avoid heavy work at import
 st.sidebar.header("Run options")
 limit_partial = st.sidebar.checkbox("Use partial dataset (faster first run)", value=True)
 max_players   = st.sidebar.slider("Max players when partial", 50, 600, 200, 50)
-
 build = st.button("Build / Refresh predictions")
 
-# function to get match-by-match history for a player
-def fetch_player_history(pid):
-    j = get_json(f"{BASE}/element-summary/{pid}/")
-    df = pd.DataFrame(j.get('history', []))
-    if df.empty:
-        return df
-    needed = ['element','opponent_team','round','minutes','total_points','goals_scored','assists',
-              'ict_index','creativity','influence','threat',
-              'expected_goals','expected_assists','expected_goal_involvements',
-              'expected_goals_conceded','was_home','kickoff_time']
-    for c in needed:
-        if c not in df.columns: df[c] = np.nan
-    df['player_id'] = pid
-    return df
-
-# loop over all players and get their match history
-all_hist = []
-for pid in tqdm(players['player_id'], desc="fetching players"):
+if build:
     try:
-        h = fetch_player_history(pid)
-        if not h.empty: all_hist.append(h)
-    except:
-        pass  # if one player fails, skip
+        # 1) Grab static data
+        bootstrap = get_json(f"{BASE}/bootstrap-static/")
+        players_meta = pd.DataFrame(bootstrap['elements'])
+        teams_meta   = pd.DataFrame(bootstrap['teams'])
+        fixtures     = pd.DataFrame(get_json(f"{BASE}/fixtures/"))
 
-hist = pd.concat(all_hist, ignore_index=True)
-hist['kickoff_time'] = pd.to_datetime(hist['kickoff_time'], errors='coerce')
-hist['round'] = pd.to_numeric(hist['round'], errors='coerce')
-hist['was_home'] = hist['was_home'].astype('Int64')
-hist = hist[hist['kickoff_time'].notna()].sort_values(['player_id','kickoff_time']).reset_index(drop=True)
+        # 2) Compact teams & players
+        teams = teams_meta[['id','name','short_name','strength',
+                            'strength_attack_home','strength_attack_away',
+                            'strength_defence_home','strength_defence_away']].rename(columns={'id':'team_id'})
 
-hist.head()
+        players = players_meta[['id','first_name','second_name','web_name','team','element_type']] \
+                    .rename(columns={'id':'player_id','team':'team_id'}) \
+                    .merge(teams, on='team_id', how='left')
 
-# add opponent info (strength etc.)
-opp = teams.rename(columns={'team_id':'opp_team_id','name':'opp_name','short_name':'opp_short_name',
-                            'strength':'opp_strength',
-                            'strength_defence_home':'opp_strength_defence_home',
-                            'strength_defence_away':'opp_strength_defence_away'})
+        st.subheader("Players (sample)")
+        st.dataframe(players.head(10), use_container_width=True)
 
-hist = hist.merge(players[['player_id','team_id','web_name','element_type',
-                           'strength','strength_attack_home','strength_attack_away',
-                           'strength_defence_home','strength_defence_away']],
-                  on='player_id', how='left')
+        # 3) Match histories (respect partial setting for faster runs)
+        all_hist = []
+        ids = players['player_id'].tolist()
+        if limit_partial:
+            ids = ids[:max_players]
 
-hist = hist.merge(opp[['opp_team_id','opp_strength','opp_strength_defence_home','opp_strength_defence_away']],
-                  left_on='opponent_team', right_on='opp_team_id', how='left')
+        for pid in tqdm(ids, desc="fetching players"):
+            try:
+                h = fetch_player_history(pid)
+                if not h.empty:
+                    all_hist.append(h)
+            except:
+                pass  # skip failures
 
-hist['team_strength_diff'] = hist['strength'] - hist['opp_strength']
-hist[['web_name','round','total_points','minutes','team_strength_diff']].head(10)
+        if not all_hist:
+            st.error("No player histories were fetched. Try unchecking partial dataset or increase max players.")
+            st.stop()
 
-# add lag + rolling features so model can see "recent form"
-def add_player_features(df, lags=(1,2,3), windows=(3,5,8)):
-    df = df.copy()
-    grp = df.groupby('player_id', group_keys=False)
-    base_cols = ['total_points','minutes','goals_scored','assists',
-                 'ict_index','creativity','influence','threat',
-                 'expected_goals','expected_assists','expected_goal_involvements']
+        hist = pd.concat(all_hist, ignore_index=True)
+        hist['kickoff_time'] = pd.to_datetime(hist['kickoff_time'], errors='coerce')
+        hist['round'] = pd.to_numeric(hist['round'], errors='coerce')
+        hist['was_home'] = hist['was_home'].astype('Int64')
+        hist = hist[hist['kickoff_time'].notna()] \
+                   .sort_values(['player_id','kickoff_time']) \
+                   .reset_index(drop=True)
 
-    # lag features
-    for col in base_cols:
-        for L in lags:
-            df[f'{col}_lag{L}'] = grp[col].shift(L)
+        st.subheader("History (sample)")
+        st.dataframe(hist.head(10), use_container_width=True)
 
-    # rolling means/sums
-    for W in windows:
-        for col in base_cols:
-            df[f'{col}_roll{W}_mean'] = grp[col].shift(1).rolling(W).mean()
-            df[f'{col}_roll{W}_sum']  = grp[col].shift(1).rolling(W).sum()
+        # 4) Opponent context
+        opp = teams.rename(columns={
+            'team_id':'opp_team_id','name':'opp_name','short_name':'opp_short_name',
+            'strength':'opp_strength',
+            'strength_defence_home':'opp_strength_defence_home',
+            'strength_defence_away':'opp_strength_defence_away'
+        })
 
-    # availability
-    df['played_last_match'] = grp['minutes'].shift(1).fillna(0).gt(0).astype(int)
-    df['played_last3_pct']  = grp['minutes'].shift(1).rolling(3).apply(lambda x: np.mean(x>0), raw=True)
+        hist = hist.merge(
+            players[['player_id','team_id','web_name','element_type',
+                     'strength','strength_attack_home','strength_attack_away',
+                     'strength_defence_home','strength_defence_away']],
+            on='player_id', how='left'
+        ).merge(
+            opp[['opp_team_id','opp_strength','opp_strength_defence_home','opp_strength_defence_away']],
+            left_on='opponent_team', right_on='opp_team_id', how='left'
+        )
 
-    # attack vs defence diff
-    df['attack_v_def_diff'] = np.where(
-        df['was_home']==1,
-        df['strength_attack_home'] - df['opp_strength_defence_away'],
-        df['strength_attack_away'] - df['opp_strength_defence_home']
-    )
+        hist['team_strength_diff'] = hist['strength'] - hist['opp_strength']
 
-    # time features
-    df['month'] = df['kickoff_time'].dt.month
-    df['dow'] = df['kickoff_time'].dt.dayofweek
-    return df
+        # 5) Feature engineering
+        def add_player_features(df, lags=(1,2,3), windows=(3,5,8)):
+            df = df.copy()
+            grp = df.groupby('player_id', group_keys=False)
+            base_cols = ['total_points','minutes','goals_scored','assists',
+                         'ict_index','creativity','influence','threat',
+                         'expected_goals','expected_assists','expected_goal_involvements']
 
-fe = add_player_features(hist)
+            for col in base_cols:
+                for L in lags:
+                    df[f'{col}_lag{L}'] = grp[col].shift(L)
 
-# we want to predict NEXT match total_points
-fe['y_next_points'] = fe.groupby('player_id')['total_points'].shift(-1)
+            for W in windows:
+                for col in base_cols:
+                    df[f'{col}_roll{W}_mean'] = grp[col].shift(1).rolling(W).mean()
+                    df[f'{col}_roll{W}_sum']  = grp[col].shift(1).rolling(W).sum()
 
-# drop rows that don’t have enough history/future
-model_df = fe.dropna(subset=['y_next_points','total_points_lag1','minutes_lag1']).copy()
-model_df.shape
+            df['played_last_match'] = grp['minutes'].shift(1).fillna(0).gt(0).astype(int)
+            df['played_last3_pct']  = grp['minutes'].shift(1).rolling(3).apply(lambda x: np.mean(x>0), raw=True)
 
-exclude = {'y_next_points','total_points','kickoff_time','web_name','opp_name','opp_short_name',
-           'opp_team_id','team_id','opponent_team','name','short_name'}
-feature_cols = [c for c in model_df.columns if c not in exclude and c != 'was_home'
-                and pd.api.types.is_numeric_dtype(model_df[c])]
+            df['attack_v_def_diff'] = np.where(
+                df['was_home']==1,
+                df['strength_attack_home'] - df['opp_strength_defence_away'],
+                df['strength_attack_away'] - df['opp_strength_defence_home']
+            )
 
-X = model_df[feature_cols].fillna(0)
-y = model_df['y_next_points'].astype(float)
-groups = model_df['player_id']
+            df['month'] = df['kickoff_time'].dt.month
+            df['dow'] = df['kickoff_time'].dt.dayofweek
+            return df
 
-# baseline = 3 game avg
-baseline = model_df['total_points_roll3_mean'].fillna(model_df['total_points_lag1'])
+        fe = add_player_features(hist)
+        fe['y_next_points'] = fe.groupby('player_id')['total_points'].shift(-1)
 
-# groupkfold so same player doesn't leak train/val
-gkf = GroupKFold(n_splits=5)
-oof_pred = np.zeros(len(model_df))
+        model_df = fe.dropna(subset=['y_next_points','total_points_lag1','minutes_lag1']).copy()
 
-for tr, va in gkf.split(X, y, groups):
-    model = XGBRegressor(
-        n_estimators=600, learning_rate=0.05, max_depth=6,
-        subsample=0.8, colsample_bytree=0.8,
-        random_state=42, n_jobs=-1, tree_method="hist"
-    )
-    model.fit(X.iloc[tr], y.iloc[tr], eval_set=[(X.iloc[va], y.iloc[va])], verbose=False)
-    oof_pred[va] = model.predict(X.iloc[va])
+        exclude = {'y_next_points','total_points','kickoff_time','web_name','opp_name','opp_short_name',
+                   'opp_team_id','team_id','opponent_team','name','short_name'}
+        feature_cols = [c for c in model_df.columns
+                        if c not in exclude and c != 'was_home' and pd.api.types.is_numeric_dtype(model_df[c])]
 
-print("Model MAE:", mean_absolute_error(y, oof_pred))
-print("Baseline MAE:", mean_absolute_error(y, baseline))
+        X = model_df[feature_cols].fillna(0)
+        y = model_df['y_next_points'].astype(float)
 
-final_model = XGBRegressor(
-    n_estimators=800, learning_rate=0.04, max_depth=6,
-    subsample=0.9, colsample_bytree=0.9,
-    random_state=42, n_jobs=-1, tree_method="hist"
-)
-final_model.fit(X, y, verbose=False)
+        # 6) Train final model (simple fit; you already validated offline)
+        final_model = XGBRegressor(
+            n_estimators=800, learning_rate=0.04, max_depth=6,
+            subsample=0.9, colsample_bytree=0.9,
+            random_state=42, n_jobs=-1, tree_method="hist"
+        )
+        final_model.fit(X, y, verbose=False)
 
-# get latest row per player
-latest = fe.sort_values(['player_id','kickoff_time']).groupby('player_id').tail(1).copy()
+        # 7) Build next-GW frame & predict
+        upcoming = fixtures.copy()
+        next_gw = upcoming.loc[(~upcoming['finished']) & (upcoming['event'].notna()), 'event'].min()
+        if pd.isna(next_gw):
+            st.warning("No upcoming gameweek found yet — try again later.")
+            st.stop()
 
-# Add print statement to inspect latest columns before merge with players
-print("Columns of latest before merge with players:")
-print(latest.columns)
-print("\nHead of latest before merge with players:")
-display(latest.head())
+        upcoming_next = upcoming[(upcoming['event']==next_gw) & (~upcoming['finished'])].copy()
 
+        home = upcoming_next[['team_h','team_a']].rename(columns={'team_h':'team_id','team_a':'opp_team_id'}).assign(was_home=1)
+        away = upcoming_next[['team_a','team_h']].rename(columns={'team_a':'team_id','team_h':'opp_team_id'}).assign(was_home=0)
+        team_next = pd.concat([home, away], ignore_index=True)
 
-# Merge latest with players to get team_id and other player info
-latest = latest.merge(players[['player_id','team_id','web_name','element_type',
-                               'strength','strength_attack_home','strength_attack_away',
-                               'strength_defence_home','strength_defence_away']],
-                      on='player_id', how='left')
+        latest = fe.sort_values(['player_id','kickoff_time']).groupby('player_id').tail(1).copy()
+        latest = latest.merge(players[['player_id','team_id','web_name','element_type',
+                                       'strength_attack_home','strength_attack_away',
+                                       'strength_defence_home','strength_defence_away']],
+                              on='player_id', how='left')
+        latest = latest.merge(team_next, on='team_id', how='left')
 
-# Add print statement to inspect latest columns after merge with players
-print("\nColumns of latest after merge with players:")
-print(latest.columns)
-print("\nHead of latest after merge with players:")
-display(latest.head())
+        opp2 = teams.rename(columns={'team_id':'opp_team_id','strength':'opp_strength',
+                                     'strength_defence_home':'opp_strength_defence_home',
+                                     'strength_defence_away':'opp_strength_defence_away'})
+        latest = latest.merge(opp2[['opp_team_id','opp_strength','opp_strength_defence_home','opp_strength_defence_away']],
+                              on='opp_team_id', how='left')
 
+        latest['attack_v_def_diff'] = np.where(
+            latest['was_home'].eq(1),
+            latest['strength_attack_home'] - latest['opp_strength_defence_away'],
+            latest['strength_attack_away'] - latest['opp_strength_defence_home']
+        )
 
-# next gameweek fixtures
-upcoming = fixtures.copy()
-next_gw = upcoming.loc[(~upcoming['finished']) & (upcoming['event'].notna()), 'event'].min()
-upcoming_next = upcoming[(upcoming['event']==next_gw) & (~upcoming['finished'])].copy()
+        X_pred = latest.reindex(columns=feature_cols).fillna(0)
+        latest['pred_next_points'] = final_model.predict(X_pred)
 
-# team vs opponent
-home = upcoming_next[['team_h','team_a']].rename(columns={'team_h':'team_id','team_a':'opp_team_id'}).assign(was_home=1)
-away = upcoming_next[['team_a','team_h']].rename(columns={'team_a':'team_id','team_h':'opp_team_id'}).assign(was_home=0)
-team_next = pd.concat([home,away])
+        TEAM_MAP = teams.set_index("team_id")["short_name"].to_dict()
+        POS_MAP  = {1:"GK", 2:"DEF", 3:"MID", 4:"FWD"}
+        latest['team'] = latest['team_id'].map(TEAM_MAP)
+        latest['opp']  = latest['opp_team_id'].map(TEAM_MAP)
+        latest['position'] = latest['element_type'].map(POS_MAP)
+        latest['pred_next_points'] = latest['pred_next_points'].round(2)
 
+        # 8) Filters + display
+        st.sidebar.header("Filters")
+        pos_choice  = st.sidebar.selectbox("Position", ["All","GK","DEF","MID","FWD"])
+        team_choice = st.sidebar.selectbox("Team", ["All"] + sorted(set(TEAM_MAP.values())))
+        min_points  = st.sidebar.slider("Minimum predicted points", 0.0, 15.0, 4.0, 0.5)
+        top_n       = st.sidebar.slider("How many players to display", 10, 300, 50, 10)
+        search      = st.sidebar.text_input("Search player name")
 
-# attach team_next to players' latest data based on the player's team_id
-# Use left_on to specify the column from 'latest' and right_on for the column from 'team_next'
-latest2 = latest.merge(team_next, left_on='team_id_x', right_on='team_id', how='left')
+        tbl = latest[['web_name','position','team','opp','was_home','pred_next_points']].copy()
+        if pos_choice != "All":
+            tbl = tbl[tbl['position'] == pos_choice]
+        if team_choice != "All":
+            tbl = tbl[tbl['team'] == team_choice]
+        tbl = tbl[tbl['pred_next_points'] >= min_points]
+        if search.strip():
+            s = search.strip().lower()
+            tbl = tbl[tbl['web_name'].str.lower().str.contains(s)]
 
-# Add print statement to inspect latest2 columns after merge with team_next
-print("\nColumns of latest2 after merge with team_next:")
-print(latest2.columns)
-print("\nHead of latest2 after merge with team_next:")
-display(latest2.head())
+        tbl = tbl.sort_values('pred_next_points', ascending=False).reset_index(drop=True)
 
+        st.subheader(f"Predictions — Gameweek {int(next_gw)}")
+        st.dataframe(tbl.head(top_n), use_container_width=True)
 
-# recompute attack vs def for the new fixture
-opp = teams.rename(columns={'team_id':'opp_team_id','strength':'opp_strength',
-                            'strength_defence_home':'opp_strength_defence_home',
-                            'strength_defence_away':'opp_strength_defence_away'})
-# Use the correct column name 'opp_team_id_y' for the merge
-latest2 = latest2.merge(opp[['opp_team_id','opp_strength','opp_strength_defence_home','opp_strength_defence_away']],
-                        left_on='opp_team_id_y', right_on='opp_team_id', how='left')
+        st.download_button(
+            label="Download predictions as CSV",
+            data=tbl.to_csv(index=False).encode("utf-8"),
+            file_name=f"epl_predictions_gw{int(next_gw)}.csv",
+            mime="text/csv"
+        )
 
-latest2['attack_v_def_diff'] = np.where(
-    latest2['was_home_y']==1, # Use was_home_y from the first merge
-    latest2['strength_attack_home_x'] - latest2['opp_strength_defence_away_y'], # Use suffixed columns
-    latest2['strength_attack_away_x'] - latest2['opp_strength_defence_home_y'] # Use suffixed columns
-)
+    except Exception as e:
+        st.error("Something went wrong while building predictions.")
+        st.exception(e)
 
-# predict
-# Ensure X_pred has the same columns as X used for training
-X_pred = latest2.reindex(columns=feature_cols).fillna(0)
-latest2['pred_next_points'] = final_model.predict(X_pred)
+else:
+    st.info("Click **Build / Refresh predictions** to start.")
 
-# show top 20
-# Use the correct column names for the final display
-latest2[['web_name_x','team_id_x','opp_team_id_y','was_home_y','pred_next_points']].sort_values('pred_next_points', ascending=False).head(20).rename(columns={'web_name_x':'web_name','team_id_x':'team_id','opp_team_id_y':'opp_team_id','was_home_y':'was_home'})
-
-import streamlit as st
-
-# Remove print statement that was causing TypeError
-# print("Columns of latest2 before creating final_tbl:")
-# print(latest2.columns)
-
-# Create a temporary DataFrame with the required columns, including the correctly named element_type
-temp_tbl = latest2[['web_name_x','team_id_x','opp_team_id_y','was_home_y','pred_next_points', 'element_type_y']].copy()
-
-# Rename the columns in the temporary DataFrame
-temp_tbl.rename(columns={
-    'web_name_x': 'web_name',
-    'team_id_x': 'team_id',
-    'opp_team_id_y': 'opp_team_id',
-    'was_home_y': 'was_home',
-    'element_type_y': 'position' # Rename element_type_y to position
-}, inplace=True)
-
-# Sort the temporary DataFrame and assign to final_tbl
-final_tbl = temp_tbl.sort_values('pred_next_points', ascending=False).copy()
-
-
-# Map team IDs → short names
-TEAM_MAP = teams.set_index("team_id")["short_name"].to_dict()
-final_tbl['team'] = final_tbl['team_id'].map(TEAM_MAP)
-final_tbl['opp']  = final_tbl['opp_team_id'].map(TEAM_MAP)
-
-# Map positions
-POS_MAP = {1:"GK", 2:"DEF", 3:"MID", 4:"FWD"}
-final_tbl['position'] = final_tbl['position'].map(POS_MAP) # Now 'position' column exists
-
-# --- Streamlit filters ---
-st.sidebar.header("Filters")
-pos_choice  = st.sidebar.selectbox("Position", ["All"] + list(POS_MAP.values()))
-team_choice = st.sidebar.selectbox("Team", ["All"] + sorted(set(TEAM_MAP.values())))
-min_points  = st.sidebar.slider("Minimum predicted points", 0.0, 15.0, 4.0, 0.5)
-search      = st.sidebar.text_input("Search player name")
-
-# Apply filters
-tbl = final_tbl.copy()
-if pos_choice != "All":
-    tbl = tbl[tbl['position'] == pos_choice]
-if team_choice != "All":
-    tbl = tbl[tbl['team'] == team_choice]
-tbl = tbl[tbl['pred_next_points'] >= min_points]
-if search.strip():
-    s = search.strip().lower()
-    tbl = tbl[tbl['web_name'].str.lower().str.contains(s)]
-
-st.subheader("Predicted Fantasy Points (Top Players)")
-top_n = st.sidebar.slider("How many players to display", 10, 200, 50, 10) # Keep only one definition
-st.dataframe(tbl.head(top_n), width='stretch') # Use width='stretch' instead of use_container_width=True
-
-st.download_button(
-    label="Download predictions as CSV",
-    data=final_tbl.to_csv(index=False).encode("utf-8"),
-    file_name="predictions.csv",
-    mime="text/csv"
-)
 
