@@ -9,10 +9,10 @@ The model is trained on official FPL match-by-match data (via the public FPL API
 
 Key Features 
 - Automated data ingestion from the [FPl API] ((https://fantasy.premierleague.com/api).
-- XGBoost regressor to forecast each player's expected fantasy points in the next gameweek.
+- ***XGBoost regressor*** to forecast each player's expected fantasy points in the next gameweek.
 - Evalutaion with baseline compareison (3-game rolling average vs ML model).
 - Custom filters for insights (e.g. best underdog players outside the Big 6).
-- Outpur predictions in ranked tables and exportable CSV.
+- Output predictions in ranked tables and exportable CSV.
 
 Project Structure
 - 'fpl_predictor.py' -> main pipeline: data collection, feature engineering, model training, predictions.
